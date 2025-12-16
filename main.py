@@ -9,17 +9,17 @@ from telebot.types import ReplyKeyboardMarkup, ReplyKeyboardRemove
 load_dotenv()
 token = os.getenv('TOKEN')
 exercise = os.getenv('API_KEY')
+spoon = os.getenv('API_SPOON')
 
 bot = telebot.TeleBot(token)
 
 profiles = {}
+history = {}
 
 HEADERS = {
     "X-RapidAPI-Key": exercise,
     "X-RapidAPI-Host": "exercisedb.p.rapidapi.com"
 }
-
-history = {}
 
 MUSCLES = {
     "Грудь":"chest",
@@ -30,10 +30,127 @@ MUSCLES = {
     "Пресс":"waist"
 }
 
+def get_exercises_api(body_part, num=3):
+    url = f"https://exercisedb.p.rapidapi.com/exercises/bodyPart/{body_part}?limit=150"
+    res = requests.get(url, headers=HEADERS).json()
+    if not isinstance(res, list):
+        return []
+    return random.sample(res, min(num, len(res)))
+
+
+def generate_workout_week_api(chat_id):
+    profile = profiles[chat_id]
+    program = profile["program"]
+    goal = profile["goal"]
+
+    days = ["Понедельник","Вторник","Среда","Четверг","Пятница"]
+    week_plan = {}
+
+    for day in days:
+        exercises = []
+        if program == "Full Body":
+            for muscle in MUSCLES.values():
+                exercises.extend(get_exercises_api(muscle, num=1))
+        else:
+            if day in ["Понедельник","Среда","Пятница"]:
+                muscles_today = random.sample(list(MUSCLES.values()), 3)
+                for m in muscles_today:
+                    exercises.extend(get_exercises_api(m, num=2))
+            else:
+                continue
+
+
+        week_plan[day] = exercises
+
+
+    text = f"Твоя программа ({goal}/{program}):\n\n"
+    for day, ex_list in week_plan.items():
+        text += f"{day}:\n"
+        for ex in ex_list:
+            text += f" - {ex['name']}\n"
+        text += "\n"
+
+    bot.send_message(chat_id, text)
+
 @bot.message_handler(commands=['start'])
-def send_welcome(message):
-    bot.send_message(message.chat.id,"Привет я твой фитнес тренер\n"
-                                     "Список команд /help")
+def start_bot(message):
+    user = profiles.get(message.chat.id)
+    if not user:
+        profiles[message.chat.id] = {}
+        bot.send_message(message.chat.id, "Привет! Давай создадим твой профиль.\nВведите свой возраст:")
+        bot.register_next_step_handler(message, profile_age)
+        return
+
+    bot.send_message(message.chat.id,
+                     f"С возвращением! Твой профиль уже сохранён.\n"
+                     f"Возраст: {user.get('age')}\n"
+                     f"Вес: {user.get('weight')} кг\n"
+                     f"Рост: {user.get('height')} см\n"
+                     f"Цель: {user.get('goal')}\n"
+                     f"Программа: {user.get('program')}\n\n"
+                     f"Список команд: /help")
+
+
+def profile_age(message):
+
+    try:
+        age = int(message.text)
+        profiles[message.chat.id] = {"age": age}
+        bot.send_message(message.chat.id, "Теперь введи свой вес (кг):")
+        bot.register_next_step_handler(message, profile_weight)
+    except:
+        bot.send_message(message.chat.id, "Введи возраст числом!")
+        bot.register_next_step_handler(message, profile_age)
+
+
+def profile_weight(message):
+    try:
+        weight = float(message.text)
+        profiles[message.chat.id]["weight"] = weight
+        bot.send_message(message.chat.id, "Теперь введи свой рост (см):")
+        bot.register_next_step_handler(message, profile_height)
+    except:
+        bot.send_message(message.chat.id, "Введи вес числом!")
+        bot.register_next_step_handler(message, profile_weight)
+
+
+def profile_height(message):
+    try:
+        height = float(message.text)
+        profiles[message.chat.id]["height"] = height
+        bot.send_message(message.chat.id, "Отлично! Теперь выбери цель.")
+        choose_goal(message)
+    except:
+        bot.send_message(message.chat.id, "Введи рост числом!")
+        bot.register_next_step_handler(message, profile_height)
+
+
+def choose_goal(message):
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add("Похудение", "Набор массы", "Поддержание")
+    bot.send_message(message.chat.id, "Выбери цель:", reply_markup=keyboard)
+    bot.register_next_step_handler(message, save_goal)
+
+
+def save_goal(message):
+    profiles[message.chat.id]["goal"] = message.text
+
+    choose_program_type(message)
+
+
+def choose_program_type(message):
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add("Full Body", "Split")
+    bot.send_message(message.chat.id, "Выбери программу:", reply_markup=keyboard)
+    bot.register_next_step_handler(message, save_program)
+
+
+def save_program(message):
+    profiles[message.chat.id]["program"] = message.text
+    bot.send_message(message.chat.id, "Генерирую твою тренировочную неделю...",reply_markup=ReplyKeyboardRemove())
+    generate_workout_week_api(message.chat.id)
+
+    bot.register_next_step_handler(message, lambda msg: generate_workout_week_api(msg.chat.id))
 
 @bot.message_handler(commands=['help'])
 def com_help(message):
@@ -43,8 +160,45 @@ def com_help(message):
                                      "/full - Тренировка на все тело\n"
                                      "/history - История тренировок\n"
                                      "/advice - Совет дня\n"
+                                     "/gif - ГИФ для упражнений\n"
                                      "/bmi - Расчет ИМТ\n"
+                                     "/mealplan - План питания"
                                      "/profile - Профиль")
+
+@bot.message_handler(commands=['gif'])
+def request_exercises_gif(message):
+    bot.send_message(message.chat.id, "Напиши названия упражнений через запятую (до 6):")
+    bot.register_next_step_handler(message, send_exercises_gifs)
+
+def send_exercises_gifs(message):
+    exercises_list = [ex.strip() for ex in message.text.split(',') if ex.strip()]
+
+    if not exercises_list:
+        bot.send_message(message.chat.id, "Не введено ни одного упражнения!")
+        return
+
+    exercises_list = exercises_list[:6]
+
+    for ex_name in exercises_list:
+        get_and_send_gif(message.chat.id, ex_name)
+
+def get_and_send_gif(chat_id, ex_name):
+    ex_name_clean = ex_name.strip().lower()
+    url = f"https://exercisedb.p.rapidapi.com/exercises/name/{ex_name_clean}"
+
+    try:
+        res = requests.get(url, headers=HEADERS).json()
+    except Exception as e:
+        bot.send_message(chat_id, f"Ошибка запроса API: {e}")
+        return
+
+    if not isinstance(res, list) or not res:
+        bot.send_message(chat_id, f"Упражнение '{ex_name}' не найдено")
+        return
+
+
+    exercise_data = res[0]
+    send_ex_gif(chat_id, exercise_data)
 
 @bot.message_handler(commands=['random'])
 def random_training(message):
@@ -70,7 +224,6 @@ def random_training(message):
     for ex in workout:
         send_ex_gif(message.chat.id, ex)
 
-
 @bot.message_handler(commands=['muscle'])
 def train_muscle(message):
     keyboard = types.ReplyKeyboardMarkup()
@@ -82,7 +235,7 @@ def train_muscle(message):
 def select_muscle(message):
     name = message.text
     if name not in MUSCLES:
-        bot.send_message(message.chat.id,"Такой группы мышц нет,выбери другую командой /muscle")
+        bot.send_message(message.chat.id,"Такой группы мышц нет,выбери другую командой /muscle",reply_markup=ReplyKeyboardRemove())
         return
 
     muscle = MUSCLES[name]
@@ -133,21 +286,24 @@ def train_full(message):
 
 @bot.message_handler(commands=['history'])
 def train_history(message):
-    user = history.get(message.chat.id ,[])
-    if not user:
-        bot.send_message(message.chat.id,"Тренировок нет")
+    user_history = history.get(message.chat.id, [])
+    if not user_history:
+        bot.send_message(message.chat.id, "Тренировок нет")
         return
 
-    text = "История тренировок: \n\n"
-    for num,w in enumerate(user[-10:],1):
-        if not w or not isinstance(w, list):
+    text = "История последних тренировок:\n\n"
+
+
+    for idx, workout in enumerate(user_history[-10:], 1):
+        if not workout or not isinstance(workout, list):
             continue
 
-        names = [exercise["name"] for exercise in w if isinstance(exercise, dict) and "name" in exercise]
-        if names:
-            text += f"{num}. {','.join(names)}\n"
 
-    bot.send_message(message.chat.id,text)
+        exercise_names = [ex.get("name", "Неизвестное") for ex in workout if isinstance(ex, dict)]
+        if exercise_names:
+            text += f"{idx}. {', '.join(exercise_names)}\n"
+
+    bot.send_message(message.chat.id, text)
 
 
 
@@ -163,99 +319,45 @@ def train_advice(message):
     bot.send_message(message.chat.id,random.choice(adv))
 
 
-@bot.message_handler(commands=['bmi'])
-def body_bmi(message):
-    bot.send_message(message.chat.id,"Введи свой вес в кг:")
-    bot.register_next_step_handler(message, bmi_weight)
+@bot.message_handler(commands=['mealplan'])
+def meal_plan(message):
+    chat_id = message.chat.id
+    profile = profiles.get(chat_id)
 
-def bmi_weight(message):
-    try:
-        weight = float(message.text)
-        bot.send_message(message.chat.id,"Введи свой рост в см:")
-        bot.register_next_step_handler(message, bmi_height,weight)
-    except:
-        bot.send_message(message.chat.id,"Введи число!")
-        bot.register_next_step_handler(message, bmi_weight)
-
-def bmi_height(message, weight):
-    try:
-        height = float(message.text) / 100
-        bmi = weight / (height ** 2)
-
-        if bmi < 18.5:
-            category = "Недостаток веса"
-        elif bmi < 25:
-            category = "Норма"
-        elif bmi < 30:
-            category = "Лишний вес"
-        else:
-            category = "Лишний вес"
-
-        bot.send_message(message.chat.id,f"Твой ИМТ:{bmi:.1f}\nКатегория:{category}")
-    except:
-        bot.send_message(message.chat.id,"Введи число!")
-        bot.register_next_step_handler(message, bmi_height, weight)
-
-
-@bot.message_handler(commands=['profile'])
-def profiless(message):
-    p = profiles.get(message.chat.id)
-
-    keyboard = types.ReplyKeyboardMarkup()
-    btn = types.KeyboardButton("Изменить профиль")
-    keyboard.add(btn)
-
-    if not p or "age" not in p or "weight" not in p or "height" not in p:
-        profiles[message.chat.id] = {}
-        bot.send_message(message.chat.id,"Профиль пуст,введи возраст:", reply_markup=keyboard)
-
-        bot.register_next_step_handler(message, profile_age)
+    if not profile or "weight" not in profile or "height" not in profile or "goal" not in profile:
+        bot.send_message(chat_id, "Сначала нужно заполнить профиль командой /start")
         return
 
-
-    bot.send_message(message.chat.id,f"Твой профиль:\n"
-                                         f"Возраст: {p['age']}\n"
-                                         f"Вес: {p['weight']}кг\n"
-                                         f"Рост: {p['height']}см",
-                         reply_markup=keyboard)
+    goal = profile["goal"]
+    weight = profile["weight"]
+    height = profile["height"]
+    age = profile.get("age", 25)
 
 
-@bot.message_handler(func=lambda msg: msg.text == "Изменить профиль")
-def ch_profile(message):
-    profiles[message.chat.id] = {}
-    bot.send_message(message.chat.id,"Профиль сброшен,введи возраст:",reply_markup=ReplyKeyboardRemove())
-    bot.register_next_step_handler(message, profile_age)
+    bmi = weight / ((height/100)**2)
+    if goal == "похудение":
+        cal = int(2000 - 300)
+    elif goal == "набор массы":
+        cal = int(2000 + 300)
+    else:
+        cal = 2000
 
+    bot.send_message(chat_id, f"Твой дневной калораж примерно: {cal} ккал.\nВот примерный план питания:")
 
+    for meal_type in ["breakfast", "lunch", "dinner"]:
+        url = f"https://api.spoonacular.com/recipes/complexSearch?query={meal_type}&number=1&apiKey={spoon}"
+        res = requests.get(url).json()
 
-def profile_age(message):
-    try:
-        age = int(message.text)
-        profiles[message.chat.id] = {"age":age}
-        bot.send_message(message.chat.id,"Теперь введи свой вес(кг):")
-        bot.register_next_step_handler(message, profile_weight)
-    except:
-        bot.send_message(message.chat.id,"Введи возраст числом!")
-        bot.register_next_step_handler(message, profile_age)
+        if not res.get("results"):
+            bot.send_message(chat_id, f"Блюдо для {meal_type} не найдено")
+            continue
 
-def profile_weight(message):
-    try:
-        weight = float(message.text)
-        profiles[message.chat.id]["weight"] = float(message.text)
-        bot.send_message(message.chat.id,"Теперь введи свой рост(см):")
-        bot.register_next_step_handler(message, profile_height)
-    except:
-        bot.send_message(message.chat.id,"Введи рост числом!")
-        bot.register_next_step_handler(message, profile_weight)
+        recipe = res["results"][0]
+        title = recipe.get("title")
+        image = recipe.get("image")
+        link = f"https://spoonacular.com/recipes/{'-'.join(title.lower().split())}-{recipe.get('id')}"
 
-def profile_height(message):
-    try:
-        profiles[message.chat.id]["height"] = float(message.text)
-        bot.send_message(message.chat.id,"Профиль сохранен")
-    except:
-        bot.send_message(message.chat.id,"Введи число!")
-        bot.register_next_step_handler(message, profile_height)
-
+        bot.send_photo(chat_id, photo=image, caption=f"{meal_type.title()}: {title}\nСсылка: {link}")
 
 
 
@@ -273,8 +375,6 @@ def send_ex_gif(chat_id, ex):
         bot.send_animation(chat_id,gif_url,caption=name)
     except Exception as e:
         bot.send_message(chat_id,f"Не удалось отправить GIF: {e}")
-
-
 
 def save_history(user_id, workout):
     if user_id not in history:
